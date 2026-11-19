@@ -1,0 +1,125 @@
+# MyCode (비공개 저장소 tlsgusdlf33/0B-1) 빌드 전용.
+# 코드·결과물·비밀값은 이 공개 저장소에 남기지 않는다.
+# 필요한 Secret: MYCODE_PRIVATE_TOKEN (fine-grained, 0B-1 저장소만, Contents 읽기/쓰기)
+name: MyCode build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '0B-1 브랜치'
+        default: 'claude/local-ai-coding-assistant-m45fd7'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mycode-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 70
+    env:
+      PRIVATE_REPO: tlsgusdlf33/0B-1
+    steps:
+      - name: Checkout private code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.MYCODE_PRIVATE_TOKEN }}
+          path: app
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install and unit test
+        working-directory: app
+        shell: pwsh
+        run: |
+          npm ci --no-audit --no-fund --loglevel=error *> $null
+          if ($LASTEXITCODE) { throw 'npm ci failed' }
+          node test/run.js 2>&1 | Select-Object -Last 1
+          if ($LASTEXITCODE) { throw 'tests failed' }
+
+      - name: Bundle inference engine (llama.cpp, MIT)
+        working-directory: app
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $h = @{ Authorization = "Bearer $env:GH_TOKEN"; "User-Agent" = "ci" }
+          $rels = Invoke-RestMethod -Headers $h -Uri "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=15"
+          $pick = $null
+          foreach ($pat in @('win.*vulkan.*x64.*\.zip$', 'win.*cpu.*x64.*\.zip$')) {
+            foreach ($r in $rels) { $pick = $r.assets | Where-Object { $_.name -match $pat -and $_.name -notmatch 'cudart' } | Select-Object -First 1; if ($pick) { break } }
+            if ($pick) { break }
+          }
+          if (-not $pick) { throw 'no Windows engine asset found' }
+          Write-Host "engine: $($pick.name)"
+          Invoke-WebRequest -Uri $pick.browser_download_url -OutFile engine.zip
+          Expand-Archive engine.zip -DestinationPath engine-raw
+          $exe = Get-ChildItem engine-raw -Recurse -Filter llama-server.exe | Select-Object -First 1
+          New-Item -ItemType Directory -Force engine | Out-Null
+          Copy-Item "$($exe.DirectoryName)\*" engine -Recurse
+          Get-ChildItem engine -File | Where-Object { $_.Name -like 'llama-*.exe' -and $_.Name -ne 'llama-server.exe' } | Remove-Item
+          Remove-Item engine.zip, engine-raw -Recurse -Force
+
+      # 상세 출력은 공개 로그에 남기지 않고 결과 요약만 표시
+      - name: End-to-end check (real model, summary only)
+        working-directory: app
+        continue-on-error: true
+        timeout-minutes: 40
+        shell: pwsh
+        run: |
+          node scripts/e2e.js *> e2e.log
+          $code = $LASTEXITCODE
+          Select-String -Path e2e.log -Pattern '^\[(PASS|FAIL)\] [^:]*' | ForEach-Object { $_.Matches[0].Value }
+          Remove-Item e2e.log
+          exit $code
+
+      - name: Build installer
+        working-directory: app
+        shell: pwsh
+        run: |
+          npm version "0.2.${{ github.run_number }}" --no-git-tag-version *> $null
+          npx electron-builder --win --publish never *> build.log
+          if ($LASTEXITCODE) { Get-Content build.log -Tail 15; throw 'build failed' }
+          Get-ChildItem dist\MyCode-Setup-*.exe | ForEach-Object { "$($_.Name) $([math]::Round($_.Length/1MB)) MB" }
+
+      - name: Publish to private repo release
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          token: ${{ secrets.MYCODE_PRIVATE_TOKEN }}
+          tag_name: v0.2.${{ github.run_number }}
+          name: MyCode v0.2.${{ github.run_number }}
+          make_latest: true
+          files: app/dist/MyCode-Setup-*.exe
+          body: |
+            ## MyCode — 내 PC에서만 동작하는 AI 코딩 어시스턴트
+            설치 파일을 실행하면 바탕화면에 아이콘이 생깁니다. 기존 버전 위에 그대로 덮어 설치하면 됩니다.
+            Windows 경고가 뜨면 **추가 정보 → 실행**을 누르세요.
+
+      - name: Remove private code from runner
+        if: always()
+        shell: pwsh
+        run: Remove-Item app -Recurse -Force -ErrorAction SilentlyContinue
+
+  # 공개 저장소에 키·비밀값·비공개 코드가 올라가 있지 않은지 검사
+  leak-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Scan public repo
+        run: |
+          bad=$(find . -path ./.git -prune -o -type f \( -iname '*.jks' -o -iname '*.keystore' -o -iname '*.p12' -o -iname '*.pfx' -o -iname '*.pem' -o -iname '*.key' -o -iname '.env*' -o -iname 'key.properties' \) -print)
+          hits=$(grep -rIlE 'BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|"name": *"mycode"' --exclude-dir=.git . || true)
+          if [ -n "$bad$hits" ]; then echo "공개 저장소에 비밀 파일 또는 비공개 코드가 있습니다:"; echo "$bad"; echo "$hits"; exit 1; fi
+          echo "OK: 비밀 파일·비공개 코드 없음"

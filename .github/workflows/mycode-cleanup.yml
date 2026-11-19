@@ -1,0 +1,19 @@
+# MyCode build 가 끝나면 그 실행의 공개 로그를 삭제한다.
+name: MyCode cleanup
+
+on:
+  workflow_run:
+    workflows: ['MyCode build']
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  delete-logs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete build logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X DELETE "repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}/logs" --silent && echo "logs deleted"
