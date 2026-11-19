@@ -78,7 +78,11 @@ jobs:
         run: |
           node scripts/e2e.js *> e2e.log
           $code = $LASTEXITCODE
-          Select-String -Path e2e.log -Pattern '^\[(PASS|FAIL)\] [^:]*' | ForEach-Object { $_.Matches[0].Value }
+          # 공개 로그엔 통과 개수만, 상세 결과는 비공개 릴리즈 설명에만 기록
+          $lines = Select-String -Path e2e.log -Pattern '^\[(PASS|FAIL)\].*' | ForEach-Object { $_.Line }
+          $fail = Select-String -Path e2e.log -Pattern '^\[FAIL\]' -Context 0,6 | ForEach-Object { $_.Line; $_.Context.PostContext }
+          "PASS $(@($lines | Where-Object { $_ -like '[PASS]*' }).Count) / FAIL $(@($lines | Where-Object { $_ -like '[FAIL]*' }).Count)"
+          @('## MyCode — 내 PC에서만 동작하는 AI 코딩 어시스턴트', '설치 파일을 실행하면 바탕화면에 아이콘이 생깁니다. 기존 버전 위에 덮어 설치하면 됩니다. Windows 경고가 뜨면 **추가 정보 → 실행**.', '', '### 자동 검증 결과', '```', $lines, $fail, '```') | Out-File -Encoding utf8 ..\e2e-summary.md
           Remove-Item e2e.log
           exit $code
 
@@ -100,10 +104,7 @@ jobs:
           name: MyCode v0.2.${{ github.run_number }}
           make_latest: true
           files: app/dist/MyCode-Setup-*.exe
-          body: |
-            ## MyCode — 내 PC에서만 동작하는 AI 코딩 어시스턴트
-            설치 파일을 실행하면 바탕화면에 아이콘이 생깁니다. 기존 버전 위에 그대로 덮어 설치하면 됩니다.
-            Windows 경고가 뜨면 **추가 정보 → 실행**을 누르세요.
+          body_path: e2e-summary.md
 
       - name: Remove private code from runner
         if: always()
